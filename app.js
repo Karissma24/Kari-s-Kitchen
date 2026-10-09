@@ -1,6 +1,10 @@
-// Kari's Kitchen — recipes live in this browser's localStorage.
+// Kari's Kitchen
+// Recipes are stored online in Firebase once firebase-config.js is filled in
+// (see SETUP.md). Until then they live in this browser's localStorage.
 
 const STORAGE_KEY = "karis-kitchen-recipes";
+const MIGRATED_KEY = "karis-kitchen-moved-online";
+const FIREBASE_VERSION = "10.12.2";
 
 const SAMPLE_RECIPES = [
   {
@@ -56,18 +60,12 @@ const SAMPLE_RECIPES = [
   },
 ];
 
-// ---------- State ----------
+// ---------- Storage: this browser ----------
 
-let recipes = load();
-let filter = "all";
-let query = "";
-let editingId = null;
-let pendingPhoto = "";
-
-function load() {
+function readLocal() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw === null) return structuredClone(SAMPLE_RECIPES);
+    if (raw === null) return null;
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -75,15 +73,102 @@ function load() {
   }
 }
 
-function save() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes));
-    return true;
-  } catch {
-    alert("Oh no, the recipe box is full! Try removing a photo or two, then save again.");
-    return false;
+function createLocalStore() {
+  let list = readLocal() ?? structuredClone(SAMPLE_RECIPES);
+  let notify = () => {};
+
+  function persist(next) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      throw new Error("Oh no, the recipe box is full! Try removing a photo or two, then save again.");
+    }
+    list = next;
+    notify(list);
   }
+
+  return {
+    mode: "local",
+    start(onRecipes, onUser) {
+      notify = onRecipes;
+      onRecipes(list);
+      onUser({ user: null, canEdit: true });
+    },
+    async put(recipe) {
+      persist([...list.filter((r) => r.id !== recipe.id), recipe]);
+    },
+    async putMany(recipes) {
+      const ids = new Set(recipes.map((r) => r.id));
+      persist([...list.filter((r) => !ids.has(r.id)), ...recipes]);
+    },
+    async remove(id) {
+      persist(list.filter((r) => r.id !== id));
+    },
+  };
 }
+
+// ---------- Storage: online (Firebase) ----------
+
+async function createCloudStore(settings) {
+  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
+  const [{ initializeApp }, fbAuth, fs] = await Promise.all([
+    import(`${base}/firebase-app.js`),
+    import(`${base}/firebase-auth.js`),
+    import(`${base}/firebase-firestore.js`),
+  ]);
+
+  const app = initializeApp(settings.firebase);
+  const auth = fbAuth.getAuth(app);
+  const db = fs.getFirestore(app);
+  const recipesCol = fs.collection(db, "recipes");
+  const owner = settings.ownerEmail.trim().toLowerCase();
+
+  const put = (recipe) => {
+    const { id, ...data } = recipe;
+    return fs.setDoc(fs.doc(recipesCol, id), data);
+  };
+
+  return {
+    mode: "cloud",
+    start(onRecipes, onUser, onError) {
+      fs.onSnapshot(
+        recipesCol,
+        (snap) => onRecipes(snap.docs.map((d) => ({ ...d.data(), id: d.id }))),
+        onError,
+      );
+      fbAuth.onAuthStateChanged(auth, (user) => {
+        onUser({ user, canEdit: Boolean(user && user.email?.toLowerCase() === owner) });
+      });
+    },
+    put,
+    async putMany(recipes) {
+      for (const r of recipes) await put(r);
+    },
+    remove: (id) => fs.deleteDoc(fs.doc(recipesCol, id)),
+    signIn: () => fbAuth.signInWithPopup(auth, new fbAuth.GoogleAuthProvider()),
+    signOut: () => fbAuth.signOut(auth),
+  };
+}
+
+function cloudSettings() {
+  const s = window.KARIS_KITCHEN_FIREBASE;
+  const key = s?.firebase?.apiKey ?? "";
+  const email = s?.ownerEmail ?? "";
+  return key && !key.startsWith("PASTE") && email.includes("@") ? s : null;
+}
+
+// ---------- State ----------
+
+let store;
+let recipes = [];
+let loaded = false;
+let canEdit = false;
+let currentUser = null;
+let filter = "all";
+let query = "";
+let editingId = null;
+let pendingPhoto = "";
+let moveOffered = false;
 
 function newId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -97,11 +182,16 @@ const empty = $("#empty");
 const formDialog = $("#form-dialog");
 const form = $("#recipe-form");
 const fields = form.elements;
+const saveBtn = form.querySelector("button[type=submit]");
 const viewDialog = $("#view-dialog");
 const view = $("#recipe-view");
 const photoInput = $("#f-photo");
 const photoPreview = $("#photo-preview");
 const photoRemove = $("#photo-remove");
+const addBtn = $("#add-btn");
+const authBtn = $("#auth-btn");
+const importLabel = $("#import-label");
+const storageNote = $("#storage-note");
 
 // ---------- Helpers ----------
 
@@ -128,8 +218,28 @@ function metaHtml(r) {
   return bits.join("");
 }
 
-// Shrink photos so they fit comfortably in browser storage.
-function resizeImage(file, maxSize = 900) {
+// Fill in any missing fields so older or hand-edited recipes still display.
+function normalize(r) {
+  return {
+    time: "", serves: "", notes: "", photo: "", createdAt: Date.now(),
+    ...r,
+    category: r.category === "dessert" ? "dessert" : "cooking",
+    ingredients: Array.isArray(r.ingredients) ? r.ingredients : [],
+    steps: Array.isArray(r.steps) ? r.steps : [],
+  };
+}
+
+function saveErrorMessage(err) {
+  if (err?.code === "permission-denied") {
+    return "Only Kari can change recipes. Make sure you're signed in with the right Google account.";
+  }
+  return err?.message?.startsWith("Oh no")
+    ? err.message
+    : "Sorry, that didn't save. Check your internet connection and try again.";
+}
+
+// Shrink photos so they fit comfortably in storage.
+function resizeImage(file, maxSize = 800) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -139,7 +249,7 @@ function resizeImage(file, maxSize = 900) {
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(img.src);
-      resolve(canvas.toDataURL("image/jpeg", 0.78));
+      resolve(canvas.toDataURL("image/jpeg", 0.72));
     };
     img.onerror = reject;
     img.src = URL.createObjectURL(file);
@@ -165,7 +275,7 @@ function render() {
     <button class="card ${r.category}" data-id="${escapeHtml(r.id)}">
       <div class="card-art ${r.photo ? "" : gingham(r.category)}">
         ${r.photo
-          ? `<img src="${r.photo}" alt="">`
+          ? `<img src="${escapeHtml(r.photo)}" alt="">`
           : `${icon("daisy", "mini a")}${badge(r.category)}${icon("heart", "mini b")}`}
       </div>
       <div class="card-body">
@@ -178,19 +288,43 @@ function render() {
 
   empty.hidden = shown.length > 0;
   if (!shown.length) {
-    empty.querySelector(".empty-title").textContent = query
-      ? "No recipes match that search"
+    empty.querySelector(".empty-title").textContent =
+      !loaded ? "Gathering recipes…"
+      : query ? "No recipes match that search"
       : "Nothing in this basket yet";
+    empty.querySelector(".empty-sub").hidden = !loaded || !canEdit;
   }
+}
+
+function renderAccess() {
+  addBtn.hidden = !canEdit;
+  importLabel.hidden = !canEdit;
+
+  if (store.mode === "local") {
+    authBtn.hidden = true;
+    storageNote.textContent =
+      "Your recipes are saved in this browser. Download a backup now and then to keep them extra safe.";
+  } else {
+    authBtn.hidden = false;
+    authBtn.textContent = currentUser ? "Sign out" : "Kari's sign-in";
+    storageNote.textContent = canEdit
+      ? `Signed in as ${currentUser.email}. Your recipes are saved online and show up on every device.`
+      : "Recipes from Kari's kitchen, shared with love.";
+  }
+
+  if (viewDialog.open) openView(view.dataset.id);
 }
 
 function openView(id) {
   const r = recipes.find((x) => x.id === id);
-  if (!r) return;
+  if (!r) {
+    if (viewDialog.open) viewDialog.close();
+    return;
+  }
 
   view.innerHTML = `
     <div class="rv-hero ${r.category} ${r.photo ? "" : gingham(r.category)}">
-      ${r.photo ? `<img src="${r.photo}" alt="">` : badge(r.category)}
+      ${r.photo ? `<img src="${escapeHtml(r.photo)}" alt="">` : badge(r.category)}
       <button class="close" data-close aria-label="Close">×</button>
     </div>
     <div class="rv-body">
@@ -218,15 +352,17 @@ function openView(id) {
       ${r.notes ? `<div class="notes">${icon("bow")}${escapeHtml(r.notes).replace(/\n/g, "<br>")}</div>` : ""}
 
       <div class="rv-actions">
-        <button class="btn btn-danger" data-action="delete">Delete</button>
+        ${canEdit ? `<button class="btn btn-danger" data-action="delete">Delete</button>` : ""}
         <button class="btn btn-ghost" data-action="print">Print</button>
-        <button class="btn btn-primary" data-action="edit">Edit recipe</button>
+        ${canEdit ? `<button class="btn btn-primary" data-action="edit">Edit recipe</button>` : ""}
       </div>
     </div>
   `;
   view.dataset.id = r.id;
-  viewDialog.showModal();
-  viewDialog.scrollTop = 0;
+  if (!viewDialog.open) {
+    viewDialog.showModal();
+    viewDialog.scrollTop = 0;
+  }
 }
 
 // ---------- Form ----------
@@ -261,7 +397,7 @@ function openForm(id = null) {
   fields.title.focus();
 }
 
-form.addEventListener("submit", (e) => {
+form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const data = {
     title: fields.title.value.trim(),
@@ -275,17 +411,23 @@ form.addEventListener("submit", (e) => {
   };
   if (!data.title) return;
 
-  const before = recipes;
-  if (editingId) {
-    recipes = recipes.map((r) => (r.id === editingId ? { ...r, ...data } : r));
-  } else {
-    recipes = [...recipes, { id: newId(), createdAt: Date.now(), ...data }];
-  }
-  if (!save()) { recipes = before; return; }
+  const existing = editingId && recipes.find((r) => r.id === editingId);
+  const recipe = existing
+    ? { ...existing, ...data }
+    : { id: newId(), createdAt: Date.now(), ...data };
 
-  formDialog.close();
-  render();
-  if (editingId) openView(editingId);
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Saving…";
+  try {
+    await store.put(recipe);
+    formDialog.close();
+    if (existing) openView(existing.id);
+  } catch (err) {
+    alert(saveErrorMessage(err));
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Save recipe";
+  }
 });
 
 photoInput.addEventListener("change", async () => {
@@ -319,9 +461,20 @@ $("#search").addEventListener("input", (e) => {
   render();
 });
 
-$("#add-btn").addEventListener("click", () => openForm());
+addBtn.addEventListener("click", () => openForm());
 
-view.addEventListener("click", (e) => {
+authBtn.addEventListener("click", async () => {
+  try {
+    if (currentUser) await store.signOut();
+    else await store.signIn();
+  } catch (err) {
+    if (err?.code !== "auth/popup-closed-by-user" && err?.code !== "auth/cancelled-popup-request") {
+      alert("Sign-in didn't work. If this keeps happening, check the steps in SETUP.md.");
+    }
+  }
+});
+
+view.addEventListener("click", async (e) => {
   const id = view.dataset.id;
   const action = e.target.closest("[data-action]")?.dataset.action;
   if (action === "edit") {
@@ -332,10 +485,12 @@ view.addEventListener("click", (e) => {
   } else if (action === "delete") {
     const r = recipes.find((x) => x.id === id);
     if (r && confirm(`Delete "${r.title}"? This can't be undone.`)) {
-      recipes = recipes.filter((x) => x.id !== id);
-      save();
-      viewDialog.close();
-      render();
+      try {
+        await store.remove(id);
+        viewDialog.close();
+      } catch (err) {
+        alert(saveErrorMessage(err));
+      }
     }
   }
 });
@@ -362,28 +517,108 @@ $("#import-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
   if (!file) return;
+
+  let valid;
   try {
     const incoming = JSON.parse(await file.text());
     if (!Array.isArray(incoming)) throw new Error("not a list");
-    const valid = incoming.filter((r) => r && r.id && r.title && ["cooking", "dessert"].includes(r.category));
-    if (!confirm(`Restore ${valid.length} recipe(s)? Any that are already here will be updated from the backup.`)) return;
-
-    const byId = new Map(recipes.map((r) => [r.id, r]));
-    for (const r of valid) {
-      byId.set(r.id, {
-        time: "", serves: "", notes: "", photo: "", createdAt: Date.now(),
-        ...r,
-        ingredients: Array.isArray(r.ingredients) ? r.ingredients : [],
-        steps: Array.isArray(r.steps) ? r.steps : [],
-      });
-    }
-    const before = recipes;
-    recipes = [...byId.values()];
-    if (!save()) { recipes = before; return; }
-    render();
+    valid = incoming
+      .filter((r) => r && r.id && r.title && ["cooking", "dessert"].includes(r.category))
+      .map(normalize);
   } catch {
     alert("Hmm, that doesn't look like a Kari's Kitchen backup file.");
+    return;
+  }
+  if (!confirm(`Restore ${valid.length} recipe(s)? Any that are already here will be updated from the backup.`)) return;
+
+  try {
+    await store.putMany(valid);
+  } catch (err) {
+    alert(saveErrorMessage(err));
   }
 });
 
-render();
+// ---------- Moving browser recipes online ----------
+
+// The first time Kari signs in online, offer to copy recipes she added
+// to this browser before online storage was set up.
+async function offerToMoveLocalRecipes() {
+  if (store.mode !== "cloud" || !canEdit || !loaded || moveOffered) return;
+  moveOffered = true;
+  try {
+    if (localStorage.getItem(MIGRATED_KEY)) return;
+  } catch {
+    return;
+  }
+
+  const sampleIds = new Set(SAMPLE_RECIPES.map((r) => r.id));
+  const onlineIds = new Set(recipes.map((r) => r.id));
+  const toMove = (readLocal() ?? [])
+    .filter((r) => r && r.id && r.title && !sampleIds.has(r.id) && !onlineIds.has(r.id))
+    .map(normalize);
+
+  if (toMove.length && confirm(
+    `This browser has ${toMove.length} recipe(s) from before your recipes went online. ` +
+    "Copy them to your online recipe box so they show up everywhere?",
+  )) {
+    try {
+      await store.putMany(toMove);
+    } catch (err) {
+      alert(saveErrorMessage(err));
+      return;
+    }
+  }
+  try {
+    localStorage.setItem(MIGRATED_KEY, "yes");
+  } catch {
+    // Storage unavailable: we'll just ask again next time.
+  }
+}
+
+// ---------- Start ----------
+
+async function start() {
+  const settings = cloudSettings();
+  store = createLocalStore();
+  if (settings) {
+    try {
+      store = await createCloudStore(settings);
+    } catch {
+      alert("Couldn't reach the online recipe box, so you're seeing the recipes saved in this browser.");
+    }
+  }
+
+  render();
+  setTimeout(() => {
+    if (!loaded) {
+      empty.querySelector(".empty-title").textContent =
+        "The recipe box is taking a while to open. Check your internet connection and try refreshing.";
+    }
+  }, 15000);
+  store.start(
+    (list) => {
+      recipes = list.map(normalize);
+      loaded = true;
+      render();
+      if (viewDialog.open) openView(view.dataset.id);
+      offerToMoveLocalRecipes();
+    },
+    ({ user, canEdit: allowed }) => {
+      currentUser = user;
+      canEdit = allowed;
+      if (user && !allowed) {
+        alert(`${user.email} can view recipes but can't change them. Sign out and use Kari's Google account to edit.`);
+      }
+      renderAccess();
+      render();
+      offerToMoveLocalRecipes();
+    },
+    () => {
+      loaded = true;
+      render();
+      empty.querySelector(".empty-title").textContent = "The recipe box wouldn't open. Try refreshing the page.";
+    },
+  );
+}
+
+start();

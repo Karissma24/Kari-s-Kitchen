@@ -1,0 +1,27 @@
+rules_version = '2';
+
+// Copy all of this into Firebase → Firestore Database → Rules, then click Publish.
+// Only karissma.quinones2004@gmail.com (the same email as in firebase-config.js) can make changes.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isKari() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() == "karissma.quinones2004@gmail.com".lower();
+    }
+
+    function looksLikeARecipe() {
+      return request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.category in ["cooking", "dessert"];
+    }
+
+    match /recipes/{recipeId} {
+      allow read: if true;                                    // anyone with the link can look
+      allow create, update: if isKari() && looksLikeARecipe(); // only Kari can add or edit
+      allow delete: if isKari();                              // only Kari can delete
+    }
+  }
+}
