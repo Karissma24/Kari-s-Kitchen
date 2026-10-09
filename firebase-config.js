@@ -1,14 +1,10 @@
-// Online storage settings for Kari's Kitchen. See SETUP.md for how to fill this in.
-//
-// If these are ever blanked out, recipes go back to being saved in the browser only.
-// These values are safe to put on GitHub: Firebase's security rules (firestore.rules)
-// are what stop anyone except you from changing recipes.
+// my firebase settings (ok to be public, the rules protect the recipes)
 
 window.KARIS_KITCHEN_FIREBASE = {
-  // The Google account you'll sign in with to add and edit recipes.
+  // only this email can add/edit
   ownerEmail: "karissma.quinones2004@gmail.com",
 
-  // Paste the values from Firebase → Project settings → Your apps → SDK setup and configuration.
+  // from firebase project settings
   firebase: {
     apiKey: "AIzaSyCf2a0K2kd9wAPGBoY4mdLA-zScm8yE_nk",
     authDomain: "kari-s-kitchen.firebaseapp.com",

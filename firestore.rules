@@ -1,7 +1,7 @@
 rules_version = '2';
 
-// Copy all of this into Firebase → Firestore Database → Rules, then click Publish.
-// Only karissma.quinones2004@gmail.com (the same email as in firebase-config.js) can make changes.
+// paste into firebase > firestore > rules
+// only my account can change recipes
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -19,9 +19,9 @@ service cloud.firestore {
     }
 
     match /recipes/{recipeId} {
-      allow read: if true;                                    // anyone with the link can look
-      allow create, update: if isKari() && looksLikeARecipe(); // only Kari can add or edit
-      allow delete: if isKari();                              // only Kari can delete
+      allow read: if true;                                    // anyone can see
+      allow create, update: if isKari() && looksLikeARecipe(); // only me
+      allow delete: if isKari();                              // only me
     }
   }
 }

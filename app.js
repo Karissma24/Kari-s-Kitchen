@@ -1,6 +1,5 @@
-// Kari's Kitchen
-// Recipes are stored online in Firebase once firebase-config.js is filled in
-// (see SETUP.md). Until then they live in this browser's localStorage.
+// Kari's Kitchen 🍓
+// recipes save to firebase so they show up on my phone too
 
 const STORAGE_KEY = "karis-kitchen-recipes";
 const MIGRATED_KEY = "karis-kitchen-moved-online";
@@ -60,7 +59,7 @@ const SAMPLE_RECIPES = [
   },
 ];
 
-// ---------- Storage: this browser ----------
+// saving in the browser (backup plan if firebase isn't set up)
 
 function readLocal() {
   try {
@@ -107,7 +106,7 @@ function createLocalStore() {
   };
 }
 
-// ---------- Storage: online (Firebase) ----------
+// firebase stuff
 
 async function createCloudStore(settings) {
   const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
@@ -157,7 +156,7 @@ function cloudSettings() {
   return key && !key.startsWith("PASTE") && email.includes("@") ? s : null;
 }
 
-// ---------- State ----------
+// variables
 
 let store;
 let recipes = [];
@@ -174,7 +173,7 @@ function newId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// ---------- Elements ----------
+// page elements
 
 const $ = (sel) => document.querySelector(sel);
 const grid = $("#grid");
@@ -193,7 +192,7 @@ const authBtn = $("#auth-btn");
 const importLabel = $("#import-label");
 const storageNote = $("#storage-note");
 
-// ---------- Helpers ----------
+// helpers
 
 function escapeHtml(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({
@@ -218,7 +217,7 @@ function metaHtml(r) {
   return bits.join("");
 }
 
-// Fill in any missing fields so older or hand-edited recipes still display.
+// fills in blanks so old recipes don't break
 function normalize(r) {
   return {
     time: "", serves: "", notes: "", photo: "", createdAt: Date.now(),
@@ -238,7 +237,7 @@ function saveErrorMessage(err) {
     : "Sorry, that didn't save. Check your internet connection and try again.";
 }
 
-// Shrink photos so they fit comfortably in storage.
+// makes photos smaller so they fit
 function resizeImage(file, maxSize = 800) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -256,7 +255,7 @@ function resizeImage(file, maxSize = 800) {
   });
 }
 
-// ---------- Rendering ----------
+// showing the recipes
 
 function render() {
   for (const cat of ["all", "cooking", "dessert"]) {
@@ -365,7 +364,7 @@ function openView(id) {
   }
 }
 
-// ---------- Form ----------
+// add/edit form
 
 function setPhoto(dataUrl) {
   pendingPhoto = dataUrl;
@@ -441,7 +440,7 @@ photoInput.addEventListener("change", async () => {
 });
 photoRemove.addEventListener("click", () => setPhoto(""));
 
-// ---------- Events ----------
+// buttons + clicks
 
 grid.addEventListener("click", (e) => {
   const card = e.target.closest(".card");
@@ -495,14 +494,14 @@ view.addEventListener("click", async (e) => {
   }
 });
 
-// Close buttons and clicking the backdrop close any dialog.
+// close popups when clicking outside
 for (const dlg of [formDialog, viewDialog]) {
   dlg.addEventListener("click", (e) => {
     if (e.target === dlg || e.target.closest("[data-close]")) dlg.close();
   });
 }
 
-// ---------- Backup ----------
+// backup download + restore
 
 $("#export-btn").addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(recipes, null, 2)], { type: "application/json" });
@@ -538,10 +537,7 @@ $("#import-input").addEventListener("change", async (e) => {
   }
 });
 
-// ---------- Moving browser recipes online ----------
-
-// The first time Kari signs in online, offer to copy recipes she added
-// to this browser before online storage was set up.
+// move my old recipes online (only asks once)
 async function offerToMoveLocalRecipes() {
   if (store.mode !== "cloud" || !canEdit || !loaded || moveOffered) return;
   moveOffered = true;
@@ -571,11 +567,11 @@ async function offerToMoveLocalRecipes() {
   try {
     localStorage.setItem(MIGRATED_KEY, "yes");
   } catch {
-    // Storage unavailable: we'll just ask again next time.
+    // it'll just ask again next time
   }
 }
 
-// ---------- Start ----------
+// start everything
 
 async function start() {
   const settings = cloudSettings();
